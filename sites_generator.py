@@ -1,8 +1,12 @@
 import random
 import os
 import json
+import time
+from multiprocessing import Pool
+from functools import partial
 
 import pandas as pd
+from tqdm import tqdm
 
 from google_sheets_api import GoogleSheetsApi
 from bs4 import BeautifulSoup
@@ -19,6 +23,8 @@ MASTER_EDUCATION = 'MasterEducation'
 MASTER_MINIMUM_COUNT = 6
 MASTER_MAXIMUM_COUNT = 14
 
+NUM_THREADS = 8
+
 
 class SitesGenerator:
     def __init__(self, reviews_csv_file):
@@ -31,6 +37,8 @@ class SitesGenerator:
 
         self.master_maximum_count = MASTER_MAXIMUM_COUNT
         self.master_minimum_count = MASTER_MINIMUM_COUNT
+
+        self.progress_bar = None
 
         # Load reviews
         if not os.path.exists(reviews_csv_file):
@@ -57,22 +65,23 @@ class SitesGenerator:
                                 'B' + str(sheets.get_list_size(table_id, MASTER_EDUCATION)[1]), 'COLUMNS')
 
         # Data frame filling
-        elements_count = len(container_data[0])
-        self.container_df['sectionId'] = container_data[0]
-        self.container_df['location'] = self.expand_list(container_data[1], elements_count)
-        self.container_df['urlPath'] = self.expand_list(container_data[2], elements_count)
-        self.container_df['name'] = self.expand_list(container_data[3], elements_count)
-        self.container_df['masterList'] = self.expand_list(container_data[4], elements_count)
-        self.container_df['title'] = self.expand_list(container_data[5], elements_count)
-        self.container_df['description'] = self.expand_list(container_data[6], elements_count)
-        self.container_df['question_1'] = self.expand_list(container_data[7], elements_count)
-        self.container_df['answer_1'] = self.expand_list(container_data[8], elements_count)
-        self.container_df['question_2'] = self.expand_list(container_data[9], elements_count)
-        self.container_df['answer_2'] = self.expand_list(container_data[10], elements_count)
-        self.container_df['question_3'] = self.expand_list(container_data[11], elements_count)
-        self.container_df['answer_3'] = self.expand_list(container_data[12], elements_count)
-        self.container_df['add'] = self.to_bool_list(self.expand_list(container_data[13], elements_count))
-        self.container_df['First_add'] = self.to_bool_list(self.expand_list(container_data[14], elements_count))
+        x = 200
+        elements_count = len(container_data[0][:x])
+        self.container_df['sectionId'] = container_data[0][:x]
+        self.container_df['location'] = self.expand_list(container_data[1][:x], elements_count)
+        self.container_df['urlPath'] = self.expand_list(container_data[2][:x], elements_count)
+        self.container_df['name'] = self.expand_list(container_data[3][:x], elements_count)
+        self.container_df['masterList'] = self.expand_list(container_data[4][:x], elements_count)
+        self.container_df['title'] = self.expand_list(container_data[5][:x], elements_count)
+        self.container_df['description'] = self.expand_list(container_data[6][:x], elements_count)
+        self.container_df['question_1'] = self.expand_list(container_data[7][:x], elements_count)
+        self.container_df['answer_1'] = self.expand_list(container_data[8][:x], elements_count)
+        self.container_df['question_2'] = self.expand_list(container_data[9][:x], elements_count)
+        self.container_df['answer_2'] = self.expand_list(container_data[10][:x], elements_count)
+        self.container_df['question_3'] = self.expand_list(container_data[11][:x], elements_count)
+        self.container_df['answer_3'] = self.expand_list(container_data[12][:x], elements_count)
+        self.container_df['add'] = self.to_bool_list(self.expand_list(container_data[13][:x], elements_count))
+        self.container_df['First_add'] = self.to_bool_list(self.expand_list(container_data[14][:x], elements_count))
         self.container_df['generated'] = self.expand_list([False], elements_count)
 
         elements_count = len(master_data_data[0])
@@ -113,54 +122,103 @@ class SitesGenerator:
 
     def gen_sites(self, token, table_id, out_directory):
         # Generate sites
+        print('Generate first sites')
         firsts_sites = self.container_df[self.container_df['First_add'] == True].values
-        self.gen_sites_by_list(out_directory, firsts_sites)
+        start = time.time()
+        self.gen_sites_by_list_fast4(out_directory, firsts_sites)
+        print('Time: ', time.time()-start)
 
+        print('Generate not firsts sites')
+        start = time.time()
         not_firsts_sites = self.container_df[self.container_df['First_add'] == False].values
-        self.gen_sites_by_list(out_directory, not_firsts_sites)
+        self.gen_sites_by_list_fast4(out_directory, not_firsts_sites)
+        print('Time: ', time.time() - start)
 
         # Link sites
+        print('Link sites')
         generated_sites = self.container_df[self.container_df['generated'] == True].values
-        for site in generated_sites:
+        for site in tqdm(generated_sites):
             self.link_site(out_directory, site)
             self.container_df.loc[self.container_df['urlPath'] == site[2], 'add'] = True
 
+        print('Mapping sites')
         # Mapping sites
         map_text = '<?xml version="1.0" encoding="UTF-8"?>\n' \
                    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
         map_text += self.gen_site_map_block('https://dumkii.com/')
-        for site in generated_sites:
+        for site in tqdm(generated_sites):
             map_text += self.gen_site_map_block('https://dumkii.com/'+site[2])
         map_text += '</urlset>'
 
         with open(out_directory + 'sitemap.xml', 'w', encoding='utf-8') as f:
             f.write(map_text)
 
-        # Save added sites in google table
+        # Mark added sites in google table
+        print('Mark added sites in google table')
         sheets = GoogleSheetsApi(token)
         add_list = self.container_df['add'].tolist()
         add_list = ['add' if item else '' for item in add_list]
         sheets.put_column_to_sheets(table_id, CONTAINER_LIST, 'N', 2, len(add_list) + 2, add_list)
 
-        # # Save used goods in file
-        # used_df = pd.read_csv(self.reviews_csv_file, sep='\t')
-        # used_df = used_df[used_df.used == 1.0]
-        # used_df.to_csv(self.reviews_csv_file, sep='\t', index=False, header=True)
-        # self.review_df.to_csv(self.reviews_csv_file, sep='\t', mode='a', index=False, header=False)
-
     def gen_sites_by_list(self, out_directory, sites):
         for site in sites:
-            masters = self.get_masters_paths(site[0], self.master_minimum_count, self.master_maximum_count)
-            reviews = self.get_reviews(site[0], self.master_minimum_count, len(masters))
+            self.gen_site(out_directory, site)
 
-            if len(masters) > 0 and len(reviews) > 0:
-                # Generate site text
-                site_text = self.gen_site(site, masters, reviews)
-                # Save site
-                with open(out_directory+site[2]+'.html', 'w', encoding='utf-8') as f:
-                    f.write(site_text)
-                # Mark generated
-                self.container_df.loc[self.container_df['urlPath'] == site[2], 'generated'] = True
+    def gen_sites_by_list_fast4(self, out_directory, sites):
+        selection_id_black_list = []
+
+        # Gen master paths parallel
+        pool = Pool(NUM_THREADS)
+        func = partial(self.get_masters_paths, self.master_minimum_count, self.master_maximum_count)
+        sites_masters = []
+        for masters in tqdm(pool.imap_unordered(func, sites), total=len(sites)):
+            sites_masters.append(masters)
+
+        # Gen reviews one-thread
+        sites_reviews = []
+        for i in range(len(sites)):
+            if len(sites_masters[i]) != 0 and sites[i][0] not in selection_id_black_list:
+                reviews_buf = self.get_reviews(self.master_minimum_count, len(sites_masters[i]), sites[i][0])
+                sites_reviews.append(reviews_buf)
+                if len(reviews_buf) == 0:
+                    selection_id_black_list.append(sites[i][0])
+            else:
+                sites_reviews.append([])
+
+        # Gen sites parallel
+        func = partial(self.gen_site_fast, out_directory)
+        func_args = []
+        for i in range(len(sites)):
+            func_args.append([sites[i], sites_masters[i], sites_reviews[i]])
+
+        for _ in tqdm(pool.imap_unordered(func, func_args), total=len(func_args)):
+            pass
+
+    def gen_site(self, out_directory, site):
+        masters = self.get_masters_paths(self.master_minimum_count, self.master_maximum_count, site)
+        reviews = self.get_reviews(self.master_minimum_count, len(masters), site[0])
+
+        if len(reviews) > 0:
+            # Generate site text
+            site_text = self.gen_site_code(site, masters, reviews)
+            # Save site
+            with open(out_directory + site[2] + '.html', 'w', encoding='utf-8') as f:
+                f.write(site_text)
+            # Mark generated
+            self.container_df.loc[self.container_df['urlPath'] == site[2], 'generated'] = True
+
+    def gen_site_fast(self, out_directory, args):
+        site = args[0]
+        masters = args[1]
+        reviews = args[2]
+        if len(reviews) > 0:
+            # Generate site text
+            site_text = self.gen_site_code(site, masters, reviews)
+            # Save site
+            with open(out_directory + site[2] + '.html', 'w', encoding='utf-8') as f:
+                f.write(site_text)
+            # Mark generated
+            self.container_df.loc[self.container_df['urlPath'] == site[2], 'generated'] = True
 
     def link_site(self, out_directory, site):
         # Open site
@@ -206,7 +264,7 @@ class SitesGenerator:
         with open(out_directory + site[2] + '.html', 'w', encoding='utf-8') as f:
             f.write(str(site_item))
 
-    def gen_site(self, site_data, masters, reviews):
+    def gen_site_code(self, site_data, masters, reviews):
         # Get template of site
         with open('template.html', 'r', encoding='utf-8') as f:
             site_text = f.read()
@@ -246,10 +304,9 @@ class SitesGenerator:
 
     # Getting reviews equal selection_id from review_df, if reviews count less then minimum_reviews return [],
     # if count more then maximum_reviews return maximum_reviews reviews
-    def get_reviews(self, selection_id, minimum_reviews, maximum_reviews):
+    def get_reviews(self, minimum_reviews, maximum_reviews, selection_id):
         review_buf_df = self.review_df[(self.review_df.sectionId == selection_id) &
                                        (self.review_df.used == 0.0)].head(maximum_reviews)
-
         count_reviews = len(review_buf_df.index)
         if count_reviews < minimum_reviews:
             reviews_list = []
@@ -262,8 +319,8 @@ class SitesGenerator:
     # Getting masters paths equal selection_id from selection_master_df
     # if masters count less then minimum_masters return [],
     # if count more then maximum_masters return maximum_masters masters
-    def get_masters_paths(self, selection_id, minimum_masters, maximum_masters):
-        master_paths = self.selection_master_df[self.selection_master_df['sectionId'] == selection_id]['pathMaster']\
+    def get_masters_paths(self, minimum_masters, maximum_masters, site):
+        master_paths = self.selection_master_df[self.selection_master_df['sectionId'] == site[0]]['pathMaster']\
             .values
         master_paths = list(filter(lambda x: self.valid_master_path(x), master_paths))
 
