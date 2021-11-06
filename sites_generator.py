@@ -176,7 +176,7 @@ class SitesGenerator:
 
         # Gen reviews one-thread
         sites_reviews = []
-        for i in range(len(sites)):
+        for i in tqdm(range(len(sites))):
             if len(sites_masters[i]) != 0 and sites[i][0] not in selection_id_black_list:
                 reviews_buf = self.get_reviews(self.master_minimum_count, len(sites_masters[i]), sites[i][0])
                 sites_reviews.append(reviews_buf)
