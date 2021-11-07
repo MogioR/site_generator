@@ -23,7 +23,12 @@ MASTER_EDUCATION = 'MasterEducation'
 MASTER_MINIMUM_COUNT = 6
 MASTER_MAXIMUM_COUNT = 14
 
+# Num thread for task
 NUM_THREADS = 8
+# If true mark generated sites in google_sheets
+MAKE_REPORT = True
+# Google sheets send packet size
+GOOGLE_BLOCK_SIZE = 250
 
 
 class SitesGenerator:
@@ -153,11 +158,12 @@ class SitesGenerator:
             f.write(map_text)
 
         # Mark added sites in google table
-        print('Mark added sites in google table')
-        sheets = GoogleSheetsApi(token)
-        add_list = self.container_df['add'].tolist()
-        add_list = ['add' if item else '' for item in add_list]
-        sheets.put_column_to_sheets(table_id, CONTAINER_LIST, 'N', 2, len(add_list) + 2, add_list)
+        if MAKE_REPORT:
+            print('Mark added sites in google table')
+            sheets = GoogleSheetsApi(token)
+            add_list = self.container_df['add'].tolist()
+            add_list = ['add' if item else '' for item in add_list]
+            sheets.put_column_to_sheets_packets(table_id, CONTAINER_LIST, 'N', 2, add_list, GOOGLE_BLOCK_SIZE)
 
     def gen_sites_by_list(self, out_directory, sites):
         for site in sites:
@@ -190,8 +196,10 @@ class SitesGenerator:
         for i in range(len(sites)):
             func_args.append([sites[i], sites_masters[i], sites_reviews[i]])
 
-        for _ in tqdm(pool.imap_unordered(func, func_args), total=len(func_args)):
-            pass
+        for generated, url_path in tqdm(pool.imap_unordered(func, func_args), total=len(func_args)):
+            # Mark generated
+            if generated:
+                self.container_df.loc[self.container_df['urlPath'] == url_path, 'generated'] = True
 
     def gen_site(self, out_directory, site):
         masters = self.get_masters_paths(self.master_minimum_count, self.master_maximum_count, site)
@@ -210,14 +218,17 @@ class SitesGenerator:
         site = args[0]
         masters = args[1]
         reviews = args[2]
+        site_generated = False
+
         if len(reviews) > 0:
             # Generate site text
             site_text = self.gen_site_code(site, masters, reviews)
             # Save site
             with open(out_directory + site[2] + '.html', 'w', encoding='utf-8') as f:
                 f.write(site_text)
-            # Mark generated
-            self.container_df.loc[self.container_df['urlPath'] == site[2], 'generated'] = True
+                site_generated = True
+
+        return site_generated, site[2]
 
     def link_site(self, out_directory, site):
         # Open site

@@ -1,78 +1,102 @@
 import httplib2
+import time
+
 import apiclient.discovery
 from oauth2client.service_account import ServiceAccountCredentials
 
+
 class GoogleSheetsApi:
     def __init__(self, token):
-        self.auth_service = self.get_table_service(token)
+        self.auth_service = None
+        self.request_count = 0
+        self.request_limit = 60
+        self.request_sleep = 200
+        self.authorization(token)
 
-    """Authorisation function"""
-    """Input: Google auth token"""
-    """Output: Google api service"""
-    def get_table_service(self, token):
+
+    # Authorisation in serves google
+    # Accept: authorisation token
+    def authorization(self, token):
         credentials = ServiceAccountCredentials.from_json_keyfile_name(
             token,
             ['https://www.googleapis.com/auth/spreadsheets'])
         http_auth = credentials.authorize(httplib2.Http())
-        return apiclient.discovery.build('sheets', 'v4', http=http_auth)
+        self.auth_service = apiclient.discovery.build('sheets', 'v4', http=http_auth)
+        self.request_count += 1
 
-    """Function for get  data from range(start_range_point, end_range_point) from Google docs sheets"""
-    """Input: table_id(str), list_name(str), start_range_point(str), end_range_point(str), majorDimension(str)"""
-    """Output: [[[str]]]"""
-    def get_data_from_sheets(self, table_id, list_name, start_range_point, end_range_point, majorDimension):
+    # Get data from document table_id, sheet list_name in range [start_range_point, end_range_point]
+    # Return: mas with data with major_dimension (ROWS/COLUMNS)
+    def get_data_from_sheets(self, table_id, list_name, start_range_point, end_range_point, major_dimension):
+        self.request_count += 1
+        if self.request_count >= self.request_limit:
+            self.request_count = 0
+            time.sleep(self.request_sleep)
+
         values = self.auth_service.spreadsheets().values().get(
             spreadsheetId=table_id,
             range="'{0}'!{1}:{2}".format(list_name, start_range_point, end_range_point),
-            majorDimension=majorDimension
+            majorDimension=major_dimension
         ).execute()
+        if 'values' in values.keys():
+            return values['values']
+        else:
+            return []
 
-        return values['values']
+    # Put data to document table_id, sheet list_name in range [start_range_point, end_range_point]
+    # in major_dimension (ROWS/COLUMNS)
+    def put_data_to_sheets(self, table_id, list_name, start_range_point, end_range_point, major_dimension, data):
+        self.request_count += 1
+        print(self.request_count)
+        if self.request_count >= self.request_limit:
+            self.request_count = 0
+            print('sleep')
+            time.sleep(self.request_sleep)
 
-    """Function put data([[]]) in the google sheets table_id(str) in 
-                list_name(str)!start_range_point(str):end_range_point(str)"""
-    """Input: table_id(str), list_name(str), start_range_point(str), end_range_point(str)), 
-              majorDimension ROWS/COLUMNS, data([[]])"""
-    """Output: """
-    """influence: writes in table table_id"""
-    def put_data_to_sheets(self, table_id, list_name, start_range_point, end_range_point,
-                           majorDimension, data):
         values = self.auth_service.spreadsheets().values().batchUpdate(
             spreadsheetId=table_id,
             body={
                 "valueInputOption": "USER_ENTERED",
                 "data": [{
                     "range": ("{0}!{1}:{2}".format(list_name, start_range_point, end_range_point)),
-                    "majorDimension": majorDimension,
+                    "majorDimension": major_dimension,
                     "values": data
                 }]
             }).execute()
 
-    """Function put data([]) in the google sheets table_id(str) in 
-                list_name(str)!column(str)start_row(int):column(str)end_row(int)"""
-    """Input: table_id(str), list_name(str), start_range_point(str), end_range_point(str)), 
-               data([])"""
-    """Output: """
-    """influence: writes in table table_id"""
-    def put_column_to_sheets(self, table_id, list_name, column, start_row, end_row, data):
+    # Put data to document table_id, sheet list_name in column column(char) and range [start_row, start_row+len(data)]
+    def put_column_to_sheets(self, table_id, list_name, column, start_row, data):
         values = [[i] for i in data]
         self.put_data_to_sheets(table_id, list_name, column + str(start_row),
-                           column + str(end_row), 'ROWS', values)
+                           column + str(start_row+len(data)), 'ROWS', values)
 
-    """Function put data([]) in the google sheets table_id(str) in 
-                list_name(str)!start_column(str)row(int):end_column(str)row(int)"""
-    """Input: table_id(str), list_name(str), start_range_point(str), end_range_point(str)), 
-               data([])"""
-    """Output: """
-    """influence: writes in table table_id"""
-    def put_row_to_sheets(self, table_id, list_name, row, start_column, end_column, data):
+    # Put data to document table_id, sheet list_name in column column(char) and range [start_row, start_row+len(data)]
+    # by packets with size packet_size
+    def put_column_to_sheets_packets(self, table_id, list_name, column, start_row, data, packet_size):
+        # Division data from pakets
+        def func_chunks_generators(lst, n):
+            for i in range(0, len(lst), n):
+                yield lst[i: i + n]
+        packets = list(func_chunks_generators(data, packet_size))
+
+        shift = 0
+        for packet in packets:
+            self.put_column_to_sheets(table_id, list_name, column, start_row+shift, packet)
+            shift += packet_size
+
+    # Put data to document table_id, sheet list_name in row column and
+    # range [start_column(char), start_column+len(data)]
+    def put_row_to_sheets(self, table_id, list_name, row, start_column, data):
         values = [[i] for i in data]
-        self.put_data_to_sheets(table_id, list_name, start_column + str(row),
-                           end_column + str(row), 'COLUMNS', values)
+        end_column = self.convert_column_index_to_int(start_column) + len(data)
+        end_column = self.convert_column_index_to_char(end_column)
+        self.put_data_to_sheets(table_id, list_name, start_column + str(row), end_column + str(row), 'COLUMNS', values)
 
-    """Function get sheet_id of list_name(str) in table table_id(str)"""
-    """Input: table_id(str), list_name(str)"""
-    """Output: sheet_id(str)"""
+    # Get sheet_id of list_name in document table_id"""
     def get_sheet_id(self, table_id, list_name):
+        self.request_count += 1
+        if self.request_count >= self.request_limit:
+            self.request_count = 0
+            time.sleep(self.request_sleep)
         spreadsheet = self.auth_service.spreadsheets().get(spreadsheetId=table_id).execute()
         sheet_id = None
         for _sheet in spreadsheet['sheets']:
@@ -80,13 +104,11 @@ class GoogleSheetsApi:
                 sheet_id = _sheet['properties']['sheetId']
         return sheet_id
 
-    """Function generate colorizing range in table request"""
-    """Input: Google auth service, table_id(str), list_name(str) tart_column(int), start_row(int), end_column(int), 
-              end_row(int)"""
-    """Output: request(dict)"""
-    """influence: change color in range"""
-    def gen_colorizing_range_in_sheets_request(self, table_id, list_name, start_column, start_row, end_column,
-                                               end_row, color):
+    # Generate spreadsheets request for colorizing range in table
+    # Accept: document table_id, sheet list_name, start_column(int), start_row(int), end_column(int), end_row(int)
+    #   color([r,g,b,a] r,g,b,a = [0;1])
+    def gen_colorizing_range_request(self, table_id, list_name, start_column, start_row, end_column,
+                                     end_row, color):
         return {
             "repeatCell": {
                 "range": {
@@ -109,26 +131,71 @@ class GoogleSheetsApi:
             }
         }
 
-    """Function apply colorizing requests"""
-    """Input: Google auth service, table_id(str), requests([dict])"""
-    def apply_colorizing_range_in_sheets_requests(self, table_id, requests):
+    # Generate spreadsheets request for auto resize columns
+    def gen_auto_resize_column_request(self, table_id, list_name, start_column, end_column):
+        return {
+            "autoResizeDimensions": {
+                "dimensions": {
+                    "sheetId": self.get_sheet_id(table_id, list_name),
+                    "dimension": "COLUMNS",
+                    "startIndex": start_column - 1,
+                    "endIndex": end_column
+                }
+            }
+        }
+
+    # Apply spreadsheets requests on document table_id
+    def apply_spreadsheets_requests(self, table_id, requests):
+        self.request_count += 1
+        if self.request_count >= self.request_limit:
+            self.request_count = 0
+            time.sleep(self.request_sleep)
         self.auth_service.spreadsheets().batchUpdate(
             spreadsheetId=table_id,
             body={"requests": [requests]}).execute()
 
-    """Function clear list of sheet"""
-    """Input: uth_service(str), table_id(str), list_name(str)"""
-    """Output: """
-    """influence: clear list"""
+    # Clear sheet list_name in document table_id
     def clear_sheet(self, table_id, list_name):
-        rangeAll = '{0}!A1:Z'.format(list_name)
-        body = {}
-        self.auth_service.spreadsheets().values().clear(spreadsheetId=table_id, range=rangeAll, body=body).execute()
+        self.request_count += 1
+        if self.request_count >= self.request_limit:
+            self.request_count = 0
+            time.sleep(self.request_sleep)
+        range_all = '{0}!A1:Z'.format(list_name)
+        self.auth_service.spreadsheets().values().clear(spreadsheetId=table_id, range=range_all, body={}).execute()
 
-    """Function return sizes of list"""
-    """Input: table_id(str), list_name(str)"""
-    """Output: [columns_count, rows_count]"""
+    # Get sizes of sheet list_name in document table_id"""
+    # Return [column_count, row_count]
     def get_list_size(self, table_id, list_name):
+        self.request_count += 1
+        if self.request_count >= self.request_limit:
+            self.request_count = 0
+            time.sleep(self.request_sleep)
         request = self.auth_service.spreadsheets().get(spreadsheetId=table_id, ranges=list_name).execute()
         return [request['sheets'][0]['properties']['gridProperties']['columnCount'],
                 request['sheets'][0]['properties']['gridProperties']['rowCount']]
+
+    # Convert char column_index to int
+    # Accept: char column_index
+    # Return: int column_index
+    @staticmethod
+    def convert_column_index_to_int(char_column_index):
+        char_column_index = char_column_index.lower()
+        int_index = 0
+        len_ = len(char_column_index)-1
+        for i in range(len_, -1, -1):
+            digit = ord(char_column_index[i]) - ord('a') + 1
+            int_index += digit * pow(26, len_ - i)
+
+        return int_index
+
+    # Convert int column_index to char
+    # Accept: int column_index
+    # Return: char column_index
+    @staticmethod
+    def convert_column_index_to_char(int_column_index):
+        char_column_index = ''
+        while int_column_index != 0:
+            char_column_index += chr(ord('A') + int_column_index % 26 - 1)
+            int_column_index //= 26
+
+        return char_column_index[::-1]
